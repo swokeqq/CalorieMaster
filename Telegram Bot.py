@@ -2,13 +2,17 @@ import telebot
 import requests
 import os
 from dotenv import load_dotenv
-from database import init_db, save_to_diary, get_diary_entries, translate  # Импорт из database.py
+from database import (init_db, save_to_diary, get_diary_entries, get_dates_with_entries,
+                      get_daily_summary, get_today_summary, translate)
+from datetime import datetime, timedelta
+import calendar
 
 # --- Конфигурация --- #
 load_dotenv()
 bot = telebot.TeleBot(os.getenv('TELEGRAM_BOT_TOKEN'))
 
 # API Keys
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 LOGMEAL_API_KEY = os.getenv('LOGMEAL_API_KEY')
 LOGMEAL_ENDPOINT = "https://api.logmeal.com/v2/image/segmentation/complete"
 LOGMEAL_HEADERS = {'Authorization': 'Bearer ' + LOGMEAL_API_KEY}
@@ -23,8 +27,23 @@ user_food_data = {}
 # Инициализация БД
 init_db()
 
+def create_main_keyboard():
+    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
 
-# --- Вспомогательные функции --- #
+    row1 = [
+        telebot.types.KeyboardButton("🍽 Потреблено сегодня"),
+        telebot.types.KeyboardButton("📜 Дневник")
+    ]
+
+    row2 = [
+        telebot.types.KeyboardButton("🧑‍🍳 Что приготовить?"),
+        telebot.types.KeyboardButton("❓ Помощь")
+    ]
+
+    keyboard.add(*row1)
+    keyboard.add(*row2)
+
+    return keyboard
 
 def analyze_photo_with_logmeal(file_path):
     """Распознает еду на фото через Logmeal API"""
@@ -60,8 +79,7 @@ def get_nutritionix_data(food_name):
         'protein': food.get('nf_protein', 0),
         'fat': food.get('nf_total_fat', 0),
         'carbs': food.get('nf_total_carbohydrate', 0),
-        # 'serving_weight': food.get('serving_weight_grams', 100)
-        'serving_weight': food['serving_weight_grams']
+        'serving_weight': food.get('serving_weight_grams', 100)
     }
 
 
@@ -70,10 +88,7 @@ def calculate_nutrition(portion_grams, nutrition_data):
     if not nutrition_data or 'serving_weight' not in nutrition_data:
         return None
 
-    # Если вес порции не указан, считаем что 100г
     base_weight = nutrition_data.get('serving_weight', 100)
-
-    # Коэффициент для пересчета
     coefficient = portion_grams / base_weight
 
     return {
@@ -97,27 +112,272 @@ def format_nutrition_response(food_name, nutrition_data, portion_grams):
     )
 
 
-# --- Обработчики команд --- #
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    bot.reply_to(message, "📌 Отправьте фото еды для анализа или /diary для просмотра дневника")
+def generate_calendar(year, month, marked_days=None):
+    """Генерирует календарь с жирным выделением дней с записями"""
+    if marked_days is None:
+        marked_days = []
 
+    cal = calendar.monthcalendar(year, month)
+    month_name = calendar.month_name[month]
 
-@bot.message_handler(commands=['diary'])
-def show_diary(message):
-    entries = get_diary_entries(message.chat.id)
+    keyboard = []
+
+    # Заголовок с месяцем и годом
+    keyboard.append([
+        telebot.types.InlineKeyboardButton(
+            f"<< {month_name} {year} >>",
+            callback_data="ignore"
+        )
+    ])
+
+    # Дни недели
+    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    keyboard.append([
+        telebot.types.InlineKeyboardButton(day, callback_data="ignore")
+        for day in week_days
+    ])
+
+    # Недели
+    for week in cal:
+        week_buttons = []
+        for day in week:
+            if day == 0:
+                week_buttons.append(
+                    telebot.types.InlineKeyboardButton(" ", callback_data="ignore")
+                )
+            else:
+                date_str = f"{year}-{month:02d}-{day:02d}"
+                # Жирное выделение для дней с записями
+                day_text = f"*{day}*" if date_str in marked_days else str(day)
+                week_buttons.append(
+                    telebot.types.InlineKeyboardButton(
+                        day_text,
+                        callback_data=f"day_{date_str}"
+                    )
+                )
+        keyboard.append(week_buttons)
+
+    # Кнопки навигации
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    keyboard.append([
+        telebot.types.InlineKeyboardButton(
+            "◀️ Предыдущий месяц",
+            callback_data=f"month_{prev_year}_{prev_month}"
+        ),
+        telebot.types.InlineKeyboardButton(
+            "▶️ Следующий месяц",
+            callback_data=f"month_{next_year}_{next_month}"
+        )
+    ])
+
+    return telebot.types.InlineKeyboardMarkup(keyboard)
+
+def show_day_entries(chat_id, date_str):
+    """Показывает записи за конкретный день"""
+    entries = get_diary_entries(chat_id, date_str)
+    summary = get_daily_summary(chat_id, date_str)
+
     if not entries:
-        bot.reply_to(message, "🍽 Дневник пуст. Отправьте фото еды чтобы начать!")
+        bot.send_message(chat_id, f"🍽 Нет записей за {date_str}")
         return
 
-    response = ["📅 Ваш дневник питания:"]
-    for entry in entries[:10]:  # Показываем последние 10 записей
-        response.append(
-            f"\n{entry[2]} | {entry[3]} ({entry[4]}г)\n"
-            f"🔥 {entry[5]} ккал | 🥩 {entry[6]}г белков"
+    # Формируем сообщение
+    message = f"📅 Дневник питания за {date_str}:\n\n"
+
+    for entry in entries:
+        message += (
+            f"⏰ {entry[2].split()[1][:5]} | {entry[3]}\n"
+            f"⚖️ {entry[4]}г | 🔥 {entry[5]} ккал\n"
+            f"🥩 {entry[6]}г белков | 🥑 {entry[7]}г жиров | 🍞 {entry[8]}г углеводов\n\n"
         )
 
-    bot.reply_to(message, "\n".join(response))
+    message += (
+        f"📊 Итого за день:\n"
+        f"🔥 {summary['calories']:.0f} ккал\n"
+        f"🥩 {summary['protein']:.1f}г белков\n"
+        f"🥑 {summary['fat']:.1f}г жиров\n"
+        f"🍞 {summary['carbs']:.1f}г углеводов"
+    )
+
+    # Кнопка "Назад к календарю"
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            "🔙 Назад к календарю",
+            callback_data="back_to_calendar"
+        )
+    )
+
+    bot.send_message(chat_id, message, reply_markup=markup)
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    keyboard = create_main_keyboard()
+    bot.reply_to(message,
+        "🍏 Добро пожаловать в Calorie Master!\n\n"
+        "📸 Отправьте фото еды для анализа питания\n"
+        "📅 Используйте дневник для отслеживания рациона\n\n"
+        "👀 Или выберите действие в меню:",
+        reply_markup=keyboard
+    )
+
+
+def generate_recipes_with_deepseek(ingredients):
+    """Генерирует рецепты через DeepSeek API"""
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    prompt = (
+        f"Сгенерируй 3 простых рецепта только из этих ингредиентов: {', '.join(ingredients)}.\n"
+        "Для каждого рецепта укажи:\n"
+        "1. Название (максимум 5 слов)\n"
+        "2. Ингредиенты (только из списка выше)\n"
+        "3. Время приготовления в минутах\n"
+        "4. Краткую инструкцию (3 предложения)\n\n"
+        "Формат вывода (без комментариев):\n"
+        "1. Название\n"
+        "• Ингредиенты: ...\n"
+        "• Время: ... мин\n"
+        "• Рецепт: ...\n\n"
+    )
+
+    response = requests.post(
+        "https://api.deepseek.com/v1/chat/completions",
+        headers=headers,
+        json={
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+
+    return response.json()["choices"][0]["message"]["content"]
+
+
+@bot.message_handler(func=lambda message: message.text == "🧑‍🍳 Что приготовить?")
+def ask_for_ingredients(message):
+    bot.reply_to(message,
+                 "📝 Перечислите продукты через запятую:\n"
+                 "Пример: <i>яйца, молоко, мука, сыр</i>",
+                 parse_mode="HTML"
+                 )
+    bot.register_next_step_handler(message, handle_ingredients_list)
+
+
+def handle_ingredients_list(message):
+    try:
+        ingredients = [x.strip() for x in message.text.split(',') if x.strip()]
+
+        if len(ingredients) < 2:
+            raise ValueError("Нужно минимум 2 ингредиента")
+
+        typing_msg = bot.send_message(message.chat.id, "🧠 Придумываю рецепты...")
+
+        recipes = generate_recipes_with_deepseek(ingredients)
+
+        response = f"🍳 <b>Рецепты из {', '.join(ingredients)}:</b>\n\n{recipes}"
+
+        # Удаляем сообщение "типирования" и отправляем результат
+        bot.delete_message(message.chat.id, typing_msg.message_id)
+        bot.reply_to(message, response, parse_mode="HTML")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+
+@bot.message_handler(func=lambda message: message.text == "📋 Меню")
+def show_menu(message):
+    keyboard = create_main_keyboard()
+    bot.reply_to(message, "Главное меню:", reply_markup=keyboard)
+
+@bot.message_handler(commands=['diary'])
+def show_diary_menu(message):
+    today = datetime.now()
+    marked_dates = get_dates_with_entries(message.chat.id)
+
+    markup = generate_calendar(today.year, today.month, marked_dates)
+
+    bot.send_message(
+        message.chat.id,
+        "📅 Выберите дату для просмотра записей:",
+        reply_markup=markup
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "🍽 Потреблено сегодня")
+def show_today_summary(message):
+    today_stats = get_today_summary(message.chat.id)
+
+    if today_stats['calories'] == 0:
+        bot.reply_to(message, "Сегодня еще нет записей в дневнике 🍽")
+        return
+
+    response = (
+        "📊 <b>Съедено сегодня:</b>\n\n"
+        f"🔥 <b>Калории:</b> {today_stats['calories']:.0f} ккал\n"
+        f"🥩 <b>Белки:</b> {today_stats['protein']:.1f}г\n"
+        f"🧈 <b>Жиры:</b> {today_stats['fat']:.1f}г\n"
+        f"🍞 <b>Углеводы:</b> {today_stats['carbs']:.1f}г\n\n"
+        "Чтобы добавить запись, отправьте фото еды 📸"
+    )
+
+    bot.reply_to(message, response, parse_mode="HTML")
+
+@bot.message_handler(func=lambda message: message.text in ["❓ Помощь", "/help"])
+def handle_help(message):
+    send_welcome(message)
+
+@bot.message_handler(func=lambda message: message.text in ["📜 Дневник", "/diary"])
+def handle_diary(message):
+    show_diary_menu(message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('day_'))
+def handle_day_selection(call):
+    """Обрабатывает выбор дня в календаре"""
+    date_str = call.data.split('_')[1]
+    show_day_entries(call.message.chat.id, date_str)
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('month_'))
+def handle_month_change(call):
+    _, year, month = call.data.split('_')
+    year = int(year)
+    month = int(month)
+    marked_dates = get_dates_with_entries(call.message.chat.id)
+
+    markup = generate_calendar(year, month, marked_dates)
+
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'back_to_calendar')
+def handle_back_to_calendar(call):
+    today = datetime.now()
+    marked_dates = get_dates_with_entries(call.message.chat.id)
+
+    markup = generate_calendar(today.year, today.month, marked_dates)
+
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="📅 Выберите дату для просмотра записей:",
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(content_types=['photo'])
