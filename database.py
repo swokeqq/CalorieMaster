@@ -24,8 +24,8 @@ def init_db():
     conn.close()
 
 
-def save_to_diary(chat_id, food_name, portion_grams, nutrition_data, photo_id):
-    """Сохраняет запись в дневник питания"""
+def save_to_diary(chat_id, food_name, portion_grams, nutrition_data, photo_id=None):
+    """Сохраняет запись в дневник питания (photo_id теперь необязательный)"""
     conn = sqlite3.connect('food_diary.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -34,13 +34,13 @@ def save_to_diary(chat_id, food_name, portion_grams, nutrition_data, photo_id):
     ''', (
         chat_id,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        translate(food_name),
+        translate_to_ru(food_name),
         portion_grams,
         nutrition_data['calories'],
         nutrition_data['protein'],
         nutrition_data['fat'],
         nutrition_data['carbs'],
-        photo_id
+        photo_id  # Может быть None
     ))
     conn.commit()
     conn.close()
@@ -138,7 +138,28 @@ def get_today_summary(chat_id):
         'carbs': summary[3] or 0
     }
 
-def translate(text, target_lang="ru"):
+def delete_diary_entry(entry_id, chat_id):
+    """Удаляет запись из дневника по ID"""
+    conn = sqlite3.connect('food_diary.db')
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM diary WHERE id = ? AND chat_id = ?', (entry_id, chat_id))
+    conn.commit()
+    conn.close()
+
+def translate_to_ru(text, target_lang="ru"):
+    """Перевод текста через Google Translate"""
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": "auto",
+        "tl": target_lang,
+        "dt": "t",
+        "q": text
+    }
+    response = requests.get(url, params=params)
+    return response.json()[0][0][0] if response.status_code == 200 else text
+
+def translate_to_en(text, target_lang="en"):
     """Перевод текста через Google Translate"""
     url = "https://translate.googleapis.com/translate_a/single"
     params = {

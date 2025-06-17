@@ -3,7 +3,8 @@ import requests
 import os
 from dotenv import load_dotenv
 from database import (init_db, save_to_diary, get_diary_entries, get_dates_with_entries,
-                      get_daily_summary, get_today_summary, translate)
+                      get_daily_summary, get_today_summary, delete_diary_entry,
+                      translate_to_ru, translate_to_en)
 from datetime import datetime, timedelta
 import calendar
 
@@ -32,7 +33,8 @@ def create_main_keyboard():
 
     row1 = [
         telebot.types.KeyboardButton("🍽 Потреблено сегодня"),
-        telebot.types.KeyboardButton("📜 Дневник")
+        telebot.types.KeyboardButton("📜 Дневник"),
+        telebot.types.KeyboardButton("✍️ Ввести вручную")
     ]
 
     row2 = [
@@ -102,7 +104,7 @@ def calculate_nutrition(portion_grams, nutrition_data):
 def format_nutrition_response(food_name, nutrition_data, portion_grams):
     """Форматирует ответ с КБЖУ"""
     return (
-        f"🍏 {translate(food_name)}\n"
+        f"🍏 {translate_to_ru(food_name)}\n"
         f"⚖️ Порция: {portion_grams}г\n\n"
         f"Энергетическая ценность:\n"
         f"🔥 {nutrition_data['calories']} ккал\n"
@@ -176,8 +178,9 @@ def generate_calendar(year, month, marked_days=None):
 
     return telebot.types.InlineKeyboardMarkup(keyboard)
 
+
 def show_day_entries(chat_id, date_str):
-    """Показывает записи за конкретный день"""
+    """Показывает записи за конкретный день с кнопками удаления"""
     entries = get_diary_entries(chat_id, date_str)
     summary = get_daily_summary(chat_id, date_str)
 
@@ -203,8 +206,17 @@ def show_day_entries(chat_id, date_str):
         f"🍞 {summary['carbs']:.1f}г углеводов"
     )
 
-    # Кнопка "Назад к календарю"
+    # Создаем кнопки удаления для каждой записи
     markup = telebot.types.InlineKeyboardMarkup()
+    for entry in entries:
+        markup.add(
+            telebot.types.InlineKeyboardButton(
+                f"❌ Удалить {entry[3][:15]}...",
+                callback_data=f"delete_{entry[0]}"
+            )
+        )
+
+    # Добавляем кнопку "Назад к календарю"
     markup.add(
         telebot.types.InlineKeyboardButton(
             "🔙 Назад к календарю",
@@ -214,14 +226,36 @@ def show_day_entries(chat_id, date_str):
 
     bot.send_message(chat_id, message, reply_markup=markup)
 
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_'))
+def handle_delete_entry(call):
+    try:
+        entry_id = int(call.data.split('_')[1])
+        delete_diary_entry(entry_id, call.message.chat.id)
+
+        # Обновляем сообщение
+        bot.answer_callback_query(call.id, "✅ Запись удалена!")
+
+        # Получаем дату из оригинального сообщения
+        original_text = call.message.text
+        date_str = original_text.split("за ")[1].split(":")[0].strip()
+
+        # Показываем обновленный список записей
+        show_day_entries(call.message.chat.id, date_str)
+
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}")
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     keyboard = create_main_keyboard()
     bot.reply_to(message,
         "🍏 Добро пожаловать в Calorie Master!\n\n"
-        "📸 Отправьте фото еды для анализа питания\n"
-        "📅 Используйте дневник для отслеживания рациона\n\n"
-        "👀 Или выберите действие в меню:",
+        "Вы можете:\n"
+        "1. 📸 Отправить фото еды для анализа\n"
+        "2. ✍️ Ввести продукт вручную\n"
+        "3. 📅 Просматривать дневник питания\n\n"
+        "Выберите действие:",
         reply_markup=keyboard
     )
 
@@ -397,7 +431,16 @@ def handle_photo(message):
         os.remove(photo_path)
 
         if 'error' in logmeal_data:
-            raise Exception(logmeal_data['error'])
+            # Если ошибка распознавания
+            markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add(telebot.types.KeyboardButton("✍️ Ввести вручную"))
+
+            bot.reply_to(message,
+                         "❌ Не удалось распознать еду на фото.\n"
+                         "Попробуйте снова или введите название вручную:",
+                         reply_markup=markup
+                         )
+            return
 
         food_name = logmeal_data['food_name']
         nutrition_data = get_nutritionix_data(food_name)
@@ -413,7 +456,7 @@ def handle_photo(message):
         }
 
         # Запрашиваем вес порции
-        bot.reply_to(message, f"🍴 Распознано: {translate(food_name)}\n"
+        bot.reply_to(message, f"🍴 Распознано: {translate_to_ru(food_name)}\n"
                               "📝 Введите вес порции в граммах:")
 
         # Регистрируем обработчик следующего сообщения
@@ -422,6 +465,57 @@ def handle_photo(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {str(e)}")
 
+
+@bot.message_handler(func=lambda message: message.text in ["✍️ Ввести вручную", "Ввести вручную"])
+def ask_for_food_name(message):
+    bot.reply_to(message,
+                 "📝 Введите название продукта или блюда:\n"
+                 "Пример: <i>банан, овсяная каша, куриная грудка</i>",
+                 parse_mode="HTML"
+                 )
+    bot.register_next_step_handler(message, handle_manual_input)
+
+
+def handle_manual_input(message):
+    try:
+        food_name = translate_to_en(message.text.strip())
+        if not food_name:
+            raise ValueError("Название не может быть пустым")
+
+        nutrition_data = get_nutritionix_data(food_name)
+
+        if not nutrition_data:
+            markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add("✍️ Уточнить запрос", "📋 Меню")
+
+            bot.reply_to(message,
+                         f"🔍 Не найдено данных для '{translate_to_ru(food_name)}'\n"
+                         "Попробуйте уточнить название:",
+                         reply_markup=markup
+                         )
+            bot.register_next_step_handler(message, handle_retry_input)
+            return
+
+        user_food_data[message.chat.id] = {
+            'food_name': translate_to_ru(food_name),
+            'nutrition_per_100g': nutrition_data
+        }
+
+        bot.reply_to(message,
+                     f"🍴 Найдено: {translate_to_ru(food_name)}\n"
+                     "📝 Введите вес порции в граммах:"
+                     )
+        bot.register_next_step_handler(message, process_portion_size)
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+
+
+def handle_retry_input(message):
+    if message.text == "✍️ Уточнить запрос":
+        ask_for_food_name(message)
+    else:
+        show_menu(message)
 
 def process_portion_size(message):
     try:
@@ -472,13 +566,12 @@ def handle_save(call):
             bot.answer_callback_query(call.id, "❌ Сессия устарела")
             return
 
-        # Сохранение в БД
         save_to_diary(
             chat_id=chat_id,
             food_name=food_info['food_name'],
             portion_grams=portion_grams,
             nutrition_data=calculate_nutrition(portion_grams, food_info['nutrition_per_100g']),
-            photo_id=food_info['photo_id']
+            photo_id=food_info.get('photo_id')
         )
 
         bot.answer_callback_query(call.id, "✅ Сохранено в дневник!")
