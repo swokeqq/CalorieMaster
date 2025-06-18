@@ -47,8 +47,9 @@ def create_main_keyboard():
 
     return keyboard
 
+
 def analyze_photo_with_logmeal(file_path):
-    """Распознает еду на фото через Logmeal API"""
+    """Распознает еду на фото через Logmeal API с проверкой вероятности"""
     try:
         with open(file_path, 'rb') as image_file:
             response = requests.post(
@@ -57,7 +58,15 @@ def analyze_photo_with_logmeal(file_path):
                 headers=LOGMEAL_HEADERS
             )
         data = response.json()
-        return {'food_name': data['segmentation_results'][0]['recognition_results'][0]['name']}
+
+        recognition_result = data['segmentation_results'][0]['recognition_results'][0]
+        food_name = recognition_result['name']
+        prob = recognition_result.get('prob', 1.0)
+
+        return {
+            'food_name': food_name,
+            'prob': float(prob)
+        }
     except Exception as e:
         return {'error': str(e)}
 
@@ -431,13 +440,22 @@ def handle_photo(message):
         os.remove(photo_path)
 
         if 'error' in logmeal_data:
-            # Если ошибка распознавания
+            raise Exception(logmeal_data['error'])
+
+        # Проверяем вероятность распознавания
+        if logmeal_data.get('prob', 1.0) < 0.5:  # Если prob < 50%
             markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add(telebot.types.KeyboardButton("✍️ Ввести вручную"))
+            markup.row(
+                telebot.types.KeyboardButton("📸 Сделать новое фото"),
+                telebot.types.KeyboardButton("✍️ Ввести вручную")
+            )
 
             bot.reply_to(message,
-                         "❌ Не удалось распознать еду на фото.\n"
-                         "Попробуйте снова или введите название вручную:",
+                         f"🤔 Я не уверен, что это ({translate_to_ru(logmeal_data['food_name'])})\n"
+                         "Вероятность распознавания: {:.0f}%\n\n"
+                         "Попробуйте сделать более четкое фото или введите название вручную:".format(
+                             logmeal_data['prob'] * 100
+                         ),
                          reply_markup=markup
                          )
             return
@@ -448,22 +466,27 @@ def handle_photo(message):
         if not nutrition_data:
             raise Exception("Не удалось получить данные о питательности")
 
-        # Сохраняем данные для следующего шага
         user_food_data[message.chat.id] = {
             'food_name': food_name,
             'nutrition_per_100g': nutrition_data,
             'photo_id': message.photo[-1].file_id
         }
 
-        # Запрашиваем вес порции
-        bot.reply_to(message, f"🍴 Распознано: {translate_to_ru(food_name)}\n"
-                              "📝 Введите вес порции в граммах:")
+        bot.reply_to(message,
+                     f"🍴 Распознано: {translate_to_ru(food_name)} "
+                     f"(уверенность: {logmeal_data['prob'] * 100:.0f}%)\n"
+                     "📝 Введите вес порции в граммах:"
+                     )
 
         # Регистрируем обработчик следующего сообщения
         bot.register_next_step_handler(message, process_portion_size)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+
+@bot.message_handler(func=lambda message: message.text == "📸 Сделать новое фото")
+def ask_for_new_photo(message):
+    bot.reply_to(message, "📸 Пожалуйста, сделайте новое фото еды (лучше освещение, крупный план)")
 
 
 @bot.message_handler(func=lambda message: message.text in ["✍️ Ввести вручную", "Ввести вручную"])
