@@ -13,7 +13,6 @@ load_dotenv()
 bot = telebot.TeleBot(os.getenv('TELEGRAM_BOT_TOKEN'))
 
 # API Keys
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 LOGMEAL_API_KEY = os.getenv('LOGMEAL_API_KEY')
 LOGMEAL_ENDPOINT = "https://api.logmeal.com/v2/image/segmentation/complete"
 LOGMEAL_HEADERS = {'Authorization': 'Bearer ' + LOGMEAL_API_KEY}
@@ -21,6 +20,10 @@ LOGMEAL_HEADERS = {'Authorization': 'Bearer ' + LOGMEAL_API_KEY}
 NUTRITIONIX_APP_ID = os.getenv('NUTRITIONIX_APP_ID')
 NUTRITIONIX_APP_KEY = os.getenv('NUTRITIONIX_APP_KEY')
 NUTRITIONIX_ENDPOINT = "https://trackapi.nutritionix.com/v2/natural/nutrients"
+
+TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
+TOGETHER_API_ENDPOINT = "https://api.together.xyz/v1/completions"
+TOGETHER_MODEL = "deepseek-ai/deepseek-v3"
 
 # Глобальный словарь для временных данных
 user_food_data = {}
@@ -268,74 +271,6 @@ def send_welcome(message):
         reply_markup=keyboard
     )
 
-
-def generate_recipes_with_deepseek(ingredients):
-    """Генерирует рецепты через DeepSeek API"""
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    prompt = (
-        f"Сгенерируй 3 простых рецепта только из этих ингредиентов: {', '.join(ingredients)}.\n"
-        "Для каждого рецепта укажи:\n"
-        "1. Название (максимум 5 слов)\n"
-        "2. Ингредиенты (только из списка выше)\n"
-        "3. Время приготовления в минутах\n"
-        "4. Краткую инструкцию (3 предложения)\n\n"
-        "Формат вывода (без комментариев):\n"
-        "1. Название\n"
-        "• Ингредиенты: ...\n"
-        "• Время: ... мин\n"
-        "• Рецепт: ...\n\n"
-    )
-
-    response = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers=headers,
-        json={
-            "model": "deepseek-chat",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7
-        }
-    )
-
-    if response.status_code != 200:
-        raise Exception(f"API Error: {response.text}")
-
-    return response.json()["choices"][0]["message"]["content"]
-
-
-@bot.message_handler(func=lambda message: message.text == "🧑‍🍳 Что приготовить?")
-def ask_for_ingredients(message):
-    bot.reply_to(message,
-                 "📝 Перечислите продукты через запятую:\n"
-                 "Пример: <i>яйца, молоко, мука, сыр</i>",
-                 parse_mode="HTML"
-                 )
-    bot.register_next_step_handler(message, handle_ingredients_list)
-
-
-def handle_ingredients_list(message):
-    try:
-        ingredients = [x.strip() for x in message.text.split(',') if x.strip()]
-
-        if len(ingredients) < 2:
-            raise ValueError("Нужно минимум 2 ингредиента")
-
-        typing_msg = bot.send_message(message.chat.id, "🧠 Придумываю рецепты...")
-
-        recipes = generate_recipes_with_deepseek(ingredients)
-
-        response = f"🍳 <b>Рецепты из {', '.join(ingredients)}:</b>\n\n{recipes}"
-
-        # Удаляем сообщение "типирования" и отправляем результат
-        bot.delete_message(message.chat.id, typing_msg.message_id)
-        bot.reply_to(message, response, parse_mode="HTML")
-
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
-
 @bot.message_handler(func=lambda message: message.text == "📋 Меню")
 def show_menu(message):
     keyboard = create_main_keyboard()
@@ -484,6 +419,100 @@ def handle_photo(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {str(e)}")
 
+
+def generate_recipes_with_together(ingredients):
+    try:
+        headers = {
+            "Authorization": f"Bearer {TOGETHER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        prompt = (
+            "Ты шеф-повар. Сгенерируй 3 разных рецепта используя ТОЛЬКО эти ингредиенты: "
+            f"{', '.join(ingredients)}.\n\n"
+            "Формат для каждого рецепта:\n"
+            "1. Название (максимум 5 слов)\n"
+            "• Ингредиенты: (только указанные)\n"
+            "• Время: (в минутах)\n"
+            "• Рецепт: (3 четких шага)\n"
+            "• КБЖУ на 100г ~ (в ккал)\n\n"
+            "Пример:\n"
+            "1. Омлет с сыром\n"
+            "• Ингредиенты: яйца, сыр\n"
+            "• Время: 10 мин\n"
+            "• Рецепт: 1. Взбейте яйца. 2. Добавьте сыр. 3. Жарьте 5 мин.\n"
+            "• КБЖУ на 100г ~ 🔥 110 ккал\n"
+            "• 🥩 14 г белков\n"
+            "• 🥑 8 г жиров\n"
+            "• 🍞 4 г углеводов"
+        )
+
+        payload = {
+            "model": TOGETHER_MODEL,
+            "prompt": prompt,
+            "max_tokens": 1500,
+            "temperature": 0.7,
+            "stop": ["###", "\n\n\n"]
+        }
+
+        response = requests.post(
+            TOGETHER_API_ENDPOINT,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+
+        # Проверка статуса ответа
+        if response.status_code != 200:
+            error_msg = response.json().get('error', {}).get('message', 'Unknown error')
+            raise Exception(f"API Error: {error_msg}")
+
+        result = response.json()["choices"][0]["text"]
+
+        # Проверка минимальной структуры ответа
+        if not all(x in result for x in ["• Ингредиенты:", "• Время:", "• Рецепт:"]):
+            raise Exception("Некорректный формат ответа")
+
+        return result
+
+    except Exception as e:
+        raise Exception(f"Ошибка генерации рецептов: {str(e)}")
+
+    except requests.exceptions.Timeout:
+        raise Exception("Превышено время ожидания ответа от Together AI")
+    except Exception as e:
+        raise Exception(f"Ошибка генерации рецептов: {str(e)}")
+
+@bot.message_handler(func=lambda message: message.text == "🧑‍🍳 Что приготовить?")
+def ask_for_ingredients(message):
+    bot.reply_to(message,
+                 "📝 Перечислите продукты через запятую:\n"
+                 "Пример: <i>яйца, молоко, мука, сыр</i>",
+                 parse_mode="HTML"
+                 )
+    bot.register_next_step_handler(message, handle_ingredients_list)
+
+def handle_ingredients_list(message):
+    try:
+        ingredients = [x.strip() for x in message.text.split(',') if x.strip()]
+
+        if len(ingredients) < 2:
+            raise ValueError("Нужно минимум 2 ингредиента")
+
+        typing_msg = bot.send_message(message.chat.id, "🧠 Придумываю рецепты...")
+
+        # Заменяем вызов API на Together AI версию
+        recipes = generate_recipes_with_together(ingredients)
+
+        # Форматируем ответ
+        response = f"🍳 <b>Рецепты из {', '.join(ingredients)}:</b>\n\n{recipes}"
+
+        bot.delete_message(message.chat.id, typing_msg.message_id)
+        bot.reply_to(message, response, parse_mode="HTML")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+
 @bot.message_handler(func=lambda message: message.text == "📸 Сделать новое фото")
 def ask_for_new_photo(message):
     bot.reply_to(message, "📸 Пожалуйста, сделайте новое фото еды (лучше освещение, крупный план)")
@@ -501,6 +530,10 @@ def ask_for_food_name(message):
 
 def handle_manual_input(message):
     try:
+        # Если пользователь ввел "меню" - возвращаем в главное меню
+        if message.text.lower() == 'меню':
+            return show_main_menu(message)
+
         food_name = translate_to_en(message.text.strip())
         if not food_name:
             raise ValueError("Название не может быть пустым")
@@ -532,7 +565,22 @@ def handle_manual_input(message):
 
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+        show_main_menu(message)  # Возвращаем в меню при ошибке
 
+
+def show_main_menu(message_or_call):
+    """Универсальная функция показа главного меню"""
+    if hasattr(message_or_call, 'chat'):  # Если это message
+        chat_id = message_or_call.chat.id
+    else:  # Если это call
+        chat_id = message_or_call.message.chat.id
+
+    keyboard = create_main_keyboard()
+    bot.send_message(
+        chat_id,
+        "Главное меню:",
+        reply_markup=keyboard
+    )
 
 def handle_retry_input(message):
     if message.text == "✍️ Уточнить запрос":
@@ -540,30 +588,31 @@ def handle_retry_input(message):
     else:
         show_menu(message)
 
+
 def process_portion_size(message):
     try:
+        # Если пользователь ввел "меню" - возвращаем в главное меню
+        if message.text.lower() == 'меню':
+            return show_main_menu(message)
+
         chat_id = message.chat.id
         portion_grams = float(message.text)
 
         if portion_grams <= 0:
             raise ValueError("Вес должен быть больше 0")
 
-        # Получаем сохраненные данные
         food_info = user_food_data.get(chat_id)
         if not food_info:
             raise Exception("Сессия устарела")
 
-        # Расчет КБЖУ
         nutrition = calculate_nutrition(portion_grams, food_info['nutrition_per_100g'])
 
-        # Формируем ответ
         response = format_nutrition_response(
             food_info['food_name'],
             nutrition,
             portion_grams
         )
 
-        # Кнопка сохранения
         markup = telebot.types.InlineKeyboardMarkup()
         markup.add(telebot.types.InlineKeyboardButton(
             "💾 Сохранить",
@@ -576,6 +625,8 @@ def process_portion_size(message):
         bot.reply_to(message, "🔢 Пожалуйста, введите число (например: 200)")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {str(e)}")
+    finally:
+        show_main_menu(message)  # Всегда возвращаем в меню после обработки
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('save_'))
@@ -598,10 +649,12 @@ def handle_save(call):
         )
 
         bot.answer_callback_query(call.id, "✅ Сохранено в дневник!")
-        bot.send_message(chat_id, "🍽 Запись добавлена в дневник (/diary)")
+        bot.send_message(chat_id, "🍽 Запись добавлена в дневник")
 
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ Ошибка: {str(e)}")
+    finally:
+        show_main_menu(call.message)  # Возвращаем в меню после сохранения
 
 
 # --- Запуск --- #

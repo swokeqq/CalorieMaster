@@ -146,28 +146,58 @@ def delete_diary_entry(entry_id, chat_id):
     conn.commit()
     conn.close()
 
-def translate_to_ru(text, target_lang="ru"):
-    """Перевод текста через Google Translate"""
-    url = "https://translate.googleapis.com/translate_a/single"
-    params = {
-        "client": "gtx",
-        "sl": "auto",
-        "tl": target_lang,
-        "dt": "t",
-        "q": text
-    }
-    response = requests.get(url, params=params)
-    return response.json()[0][0][0] if response.status_code == 200 else text
 
-def translate_to_en(text, target_lang="en"):
-    """Перевод текста через Google Translate"""
+def translate_to_ru(text: str, target_lang: str = "ru") -> str:
+    """
+    Улучшенный перевод через Google Translate API
+    """
     url = "https://translate.googleapis.com/translate_a/single"
+
     params = {
         "client": "gtx",
         "sl": "auto",
         "tl": target_lang,
         "dt": "t",
-        "q": text
+        "q": text,
+        "ie": "UTF-8",
+        "oe": "UTF-8",
+        "dj": "1"
     }
+
     response = requests.get(url, params=params)
-    return response.json()[0][0][0] if response.status_code == 200 else text
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+
+    try:
+        result = response.json()
+        if 'sentences' in result:
+            return ' '.join(s['trans'] for s in result['sentences'])
+        return text
+    except:
+        return text
+
+def translate_to_en(text: str, target_lang: str = "en") -> str:
+    url = "https://translate.googleapis.com/translate_a/single"
+
+    params = {
+        "client": "gtx",
+        "sl": "auto",
+        "tl": target_lang,
+        "dt": "t",
+        "q": text,
+        "ie": "UTF-8",
+        "oe": "UTF-8",
+        "dj": "1"
+    }
+
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+
+    try:
+        result = response.json()
+        if 'sentences' in result:
+            return ' '.join(s['trans'] for s in result['sentences'])
+        return text
+    except:
+        return text
